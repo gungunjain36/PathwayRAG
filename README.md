@@ -16,6 +16,13 @@ PathwayRAG is a local RAG (Retrieval-Augmented Generation) system built with Pat
 - **Streamlit**: Interactive web interface
 - **SentenceTransformers**: Document and query embeddings
 
+## Screenshots
+![Screenshot 2024-11-01 at 23 52 15](https://github.com/user-attachments/assets/af9ed066-2bfe-41d0-8786-8524ce3995d9)
+
+
+## Video Demo
+https://github.com/user-attachments/assets/654b9698-a202-4cda-bdb0-2c674c7b3aaf
+
 ## Prerequisites
 
 ### System Requirements
