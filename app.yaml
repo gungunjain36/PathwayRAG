@@ -1,0 +1,14 @@
+host: "0.0.0.0"
+port: 3000
+
+with_cache: True
+cache_backend: !pw.persistence.Backend.filesystem
+  path: ".Cache"
+
+$llm: !pw.xpacks.llm.OpenAIChat
+  model: "gpt-3.5-turbo"
+  temperature: 0.05
+
+$sources:
+  - !pw.io.fs.read
+    path: "data/" 

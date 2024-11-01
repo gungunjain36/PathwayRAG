@@ -1,5 +1,18 @@
-certifi==2024.8.30
-charset-normalizer==3.4.0
-idna==3.10
-requests==2.32.3
-urllib3==2.2.3
+# Core dependencies
+pathway[xpack-llm]
+sentence-transformers
+fastapi
+uvicorn
+python-dotenv
+pydantic
+requests
+streamlit
+openai
+
+# Additional dependencies (these will be installed as needed by the core packages)
+numpy
+pandas
+scikit-learn
+torch
+transformers
+tqdm

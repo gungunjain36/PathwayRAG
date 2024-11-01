@@ -1,10 +1,9 @@
 import pathway as pw
+from pathway.xpacks.llm.llms import LiteLLMChat, prompt_chat_single_qa
+from pathway.stdlib.ml.index import KNNIndex
+from pathway.xpacks.llm.embedders import SentenceTransformerEmbedder
 import os
 from dotenv import load_dotenv
-from embeddings import EmbeddingHandler
-from llm import OllamaLLM
-from indexer import DocumentIndexer
-import numpy as np
 
 load_dotenv()
 print("Environment variables loaded")
@@ -12,57 +11,53 @@ print("Environment variables loaded")
 class RAGApplication:
     def __init__(self):
         print("Initializing RAG Application...")
-        self.embedding_handler = EmbeddingHandler(os.getenv("EMBEDDING_MODEL_NAME"))
-        print(f"Embedding model loaded: {os.getenv('EMBEDDING_MODEL_NAME')}")
         
-        self.llm = OllamaLLM(
-            base_url=os.getenv("OLLAMA_BASE_URL"),
-            model_name=os.getenv("MODEL_NAME")
-        )
-        print(f"LLM initialized with model: {os.getenv('MODEL_NAME')}")
+        # Debug: Print the documents path
+        docs_path = os.getenv("DOCUMENTS_PATH")
+        print(f"Loading documents from: {docs_path}")
         
-        self.indexer = DocumentIndexer(
-            documents_path=os.getenv("DOCUMENTS_PATH"),
-            embedding_handler=self.embedding_handler
+        # Initialize the LLM using LiteLLM for Ollama
+        self.llm = LiteLLMChat(
+            model="ollama/mistral",  # Using ollama prefix for LiteLLM
+            api_base=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
+            temperature=0.05,
+            retry_strategy=pw.udfs.FixedDelayRetryStrategy(),
+            cache_strategy=pw.udfs.DefaultCache(),
         )
-        print(f"Document indexer initialized with path: {os.getenv('DOCUMENTS_PATH')}")
+        print("LLM initialized")
+        
+        # Initialize documents table with CSV format
+        class DocumentSchema(pw.Schema):
+            content: str
+            
+        self.documents = pw.io.csv.read(
+            docs_path,
+            schema=DocumentSchema,
+            mode="streaming",
+            csv_settings=pw.io.csv.CsvParserSettings(
+                delimiter=",",
+                quote='"',
+                escape=None,
+                enable_double_quote_escapes=True,
+                enable_quoting=True,
+                comment_character=None,
+            )
+        )
+        print(f"Documents loaded from: {docs_path}")
+        
+        # Create embeddings using SentenceTransformers
+        self.embedder = SentenceTransformerEmbedder(
+            model="all-MiniLM-L6-v2",  # Using a lightweight model
+        )
+        
+        # Create document embeddings
+        self.enriched_documents = self.documents + self.documents.select(
+            data=self.embedder(pw.this.content)
+        )
+        print("Document embeddings created")
         
     def setup_pipeline(self):
         print("\nSetting up pipeline...")
-        
-        # Index documents
-        print("Indexing documents...")
-        embedded_docs = self.indexer.index_documents()
-        print("Documents indexed successfully")
-        
-        # Query handling logic
-        @pw.udf
-        def query_processor(query: str, context: str) -> str:
-            print(f"\nProcessing query: {query}")
-            print(f"With context: {context}")
-            response = self.llm.generate(query, context)
-            print(f"Generated response: {response}")
-            return response
-
-        @pw.udf
-        def compute_similarity(v1: list, v2: list) -> float:
-            try:
-                # Lists are already in the correct format
-                dot_product = float(sum(a * b for a, b in zip(v1, v2)))
-                norm1 = float(sum(x * x for x in v1)) ** 0.5
-                norm2 = float(sum(x * x for x in v2)) ** 0.5
-                
-                if norm1 == 0 or norm2 == 0:
-                    return 0.0
-                
-                similarity = dot_product / (norm1 * norm2)
-                print(f"Computed similarity: {similarity}")
-                return similarity
-            except Exception as e:
-                print(f"Error computing similarity: {e}")
-                return 0.0
-        
-        print("UDFs defined successfully")
         
         # Define input schema
         class QuerySchema(pw.Schema):
@@ -79,64 +74,40 @@ class RAGApplication:
         )
         print("HTTP connector created")
         
-        # Process queries
+        # Create KNN index and process queries
         print("Setting up query processing pipeline...")
-        query_embeddings = queries.select(
-            query=pw.this.text,
-            embedding=pw.apply(self.embedding_handler, pw.this.text)
-        )
-        print("Query embedding processor created")
-
-        # Add a common key for joining
-        print("Adding join keys...")
-        docs_with_key = embedded_docs.select(
-            join_key=1,  # Changed from 'id' to 'join_key'
-            content=pw.this.content,
-            embedding=pw.this.embedding
+        index = KNNIndex(
+            self.enriched_documents.data, 
+            self.enriched_documents,
+            n_dimensions=384  # Changed to match all-MiniLM-L6-v2 dimensions
         )
         
-        queries_with_key = query_embeddings.select(
-            join_key=1,  # Changed from 'id' to 'join_key'
-            query=pw.this.query,
-            embedding=pw.this.embedding
+        # Embed queries
+        embedded_queries = queries + queries.select(
+            data=self.embedder(pw.this.text)
         )
-
-        # Join using the common key
-        print("Computing similarities...")
-        similarities = docs_with_key.join(
-            queries_with_key,
-            docs_with_key.join_key == queries_with_key.join_key  # Updated join condition
-        ).select(
-            content=docs_with_key.content,
-            query=queries_with_key.query,
-            score=pw.apply(
-                compute_similarity,
-                docs_with_key.embedding,
-                queries_with_key.embedding
+        
+        # Get relevant documents (updated to use content)
+        query_context = embedded_queries + index.get_nearest_items(
+            embedded_queries.data, 
+            k=3, 
+            collapse_rows=True
+        ).select(documents_list=pw.this.content)  # changed from doc to content
+        
+        # Build prompts and get responses
+        @pw.udf
+        def build_prompt(documents, query) -> str:
+            docs_str = "\n".join([str(doc) for doc in documents])  # ensure strings
+            return f"Given the following documents:\n{docs_str}\nanswer this query: {query}"
+        
+        results = query_context.select(
+            result=self.llm(
+                prompt_chat_single_qa(
+                    build_prompt(pw.this.documents_list, pw.this.text)
+                )
             )
         )
-        print("Similarities computed")
-        
-        # Filter and reduce
-        print("Setting up filtering and reduction...")
-        filtered_docs = similarities.filter(
-            pw.this.score > 0.7
-        ).reduce(
-            content=pw.reducers.max(pw.this.content),
-            query=pw.reducers.max(pw.this.query)
-        )
-        print("Filtering and reduction pipeline created")
-        
-        # Generate response
-        print("Setting up response generation...")
-        results = filtered_docs.select(
-            response=pw.apply(
-                query_processor,
-                pw.this.query,
-                pw.this.content
-            )
-        )
-        print("Response generation pipeline created")
+        print("Query processing pipeline created")
         
         # Write results
         print("Setting up response writer...")
